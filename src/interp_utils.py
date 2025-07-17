@@ -250,13 +250,10 @@ def grid_everything(swath_data, lat0, lon0, n=256, L_x=256e3, L_y=256e3, trim_ed
     else:
         lats = swath_data.latitude.values.flatten()
         lons = (swath_data.longitude.values.flatten() % 360 + 180) % 360 - 180
-
     # Project latitude and longitude coordinates onto an ENU coordinate system
     x, y, z = ll2xyz(lats, lons, 0, lat0, lon0, 0)
-
     # Generate regular cartesian points for grid coordinates
     x_c, y_c = np.linspace(-L_x / 2, L_x / 2, n), np.linspace(-L_y / 2, L_y / 2, n)
-    
     # Generate gridded lat/lon coordinates for the ENU tangent plane
     xx_c, yy_c = np.meshgrid(x_c, y_c)
     lat_c, lon_c = xyz2ll(xx_c.flatten(), yy_c.flatten(), 0, lat0, lon0, 0)
@@ -268,7 +265,6 @@ def grid_everything(swath_data, lat0, lon0, n=256, L_x=256e3, L_y=256e3, trim_ed
     if isinstance(swath_data, xr.Dataset):
         # Initialize a dictionary to hold gridded variables
         gridded_vars = {}
-
         # Process each variable in the Dataset
         for var_name, data_array in swath_data.data_vars.items():
             # Grid the variable, assuming it's a 2D field!
@@ -279,9 +275,7 @@ def grid_everything(swath_data, lat0, lon0, n=256, L_x=256e3, L_y=256e3, trim_ed
                 gridded_data = grid_field_enu(x, y, data_array.values.flatten(), n, L_x, L_y,"min")
             gridded_data = grid_field_enu(x, y, data_array.values.flatten(), n, L_x, L_y)
             gridded_vars[var_name] = (["x", "y"], gridded_data)
-
-        # May want to revisit the xyz-latlon gridding..
-
+            # May want to revisit the xyz-latlon gridding..
         # Return a gridded xarray.Dataset
         return xr.Dataset(
             data_vars=gridded_vars,
@@ -296,11 +290,9 @@ def grid_everything(swath_data, lat0, lon0, n=256, L_x=256e3, L_y=256e3, trim_ed
     elif isinstance(swath_data, xr.DataArray):
         # Interpolate the single data variable
         gridded_data = grid_field_enu(x, y, swath_data.values.flatten(), n, L_x, L_y)
-        
         # May want to revisit the xyz-latlon gridding..
         # lat_gridded = grid_field_enu(x, y, lats, n, L_x, L_y)
         # lon_gridded = grid_field_enu(x, y, lons, n, L_x, L_y)
-        
         # Return a gridded xarray.DataArray
         return xr.DataArray(
             data=gridded_data,

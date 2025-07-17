@@ -55,11 +55,13 @@ def list_nc_files_from_thredds_catalog(catalog_url, ssh_kwargs):
     datasets = root.findall('.//ns:dataset', namespaces=ns)
     return [ds.attrib['name'] for ds in datasets if 'name' in ds.attrib and ds.attrib['name'].endswith('.nc')]
 
+
 # ─────────────────────────────────────────────
 # File Downloader with Progress Bar
 # ─────────────────────────────────────────────
 def download_nc_file(download_url, save_path, ssh_kwargs):
     """Download a .nc file from THREDDS fileServer with a progress bar, if not already downloaded."""
+    print("save_path",save_path)
     os.makedirs(save_path, exist_ok=True)
     local_filename = os.path.join(save_path, os.path.basename(download_url))
 
@@ -123,7 +125,7 @@ def find_swaths(sw_corner, ne_corner, path_to_sph_file="./orbit_data/sph_science
 # ─────────────────────────────────────────────
 # Main Logic to Download SWOT .nc Files
 # ─────────────────────────────────────────────
-def run_download(sw_corner, ne_corner, cycles, remote_path, save_path, orbit_file_path, ssh_kwargs):
+def run_download(pass_IDs_list, cycles, remote_path, save_path, ssh_kwargs="ssha", find_swaths=False,sw_corner=[-180,-90], ne_corner=[180,90], orbit_file_path="../../orbit_files"):
     """
     Download SWOT .nc files from THREDDS that intersect with a region
     and match given cycles.
@@ -142,19 +144,27 @@ def run_download(sw_corner, ne_corner, cycles, remote_path, save_path, orbit_fil
     if product not in ["Basic","Expert","Unsmoothed","WindWave"]:
         warnings.warn(f"Can't find {product} in expected products ['Basic','Expert','Unsmoothed','WindWave']. \
                         Check that the data product exists at {remote_catalog_path}.",UserWarning)
-    # Split the cycles into calval and science
-    cycle_split = []
-    for k, g in groupby(sorted(cycles), lambda x: int(x) >= 472):
-        cycle_split.append(list(g))
-    # Get Pass IDs for Science cycles
-    for cycle in cycle_split[0]:
-        pass_IDs_list = find_swaths(sw_corner, ne_corner, path_to_sph_file=f"{orbit_file_path}/sph_science_nadir.zip")
-    science_cycle_n = len(pass_IDs_list)
-    print(f"Found {len(pass_IDs_list)} passes in {len(cycle_split[0])} cycles for the science phase.")
-    # Get Pass IDs for CalVal cycles
-    for cycle in cycle_split[1]:
-        pass_IDs_list += find_swaths(sw_corner, ne_corner, path_to_sph_file=f"{orbit_file_path}/shp_calval_nadir.zip")
-    print(f"Found {len(pass_IDs_list)-science_cycle_n} passes in {len(cycle_split[1])} cycles for the calval phase")
+
+    # Look for swaths if you want to..
+    if find_swaths:
+        # Split the cycles into calval and science
+        cycle_split = [[],[]]
+        for i, (k, g) in enumerate(groupby(sorted(cycles), lambda x: int(x) >= 472)):
+            print("i")
+            print(i)
+            cycle_split[i].append(list(g))
+        print("cycle_split",cycle_split)
+        # Get Pass IDs for Science cycles
+        if len(cycle_split[0]) > 0:
+            for cycle in cycle_split[0]:
+                pass_IDs_list = find_swaths(sw_corner, ne_corner, path_to_sph_file=f"{orbit_file_path}/sph_science_nadir.zip")
+        science_cycle_n = len(pass_IDs_list)
+        print(f"Found {len(pass_IDs_list)} passes in {len(cycle_split[0])} cycles for the science phase.")
+        # Get Pass IDs for CalVal cycles
+        if len(cycle_split[1]) > 0:
+            for cycle in cycle_split[1]:
+                pass_IDs_list += find_swaths(sw_corner, ne_corner, path_to_sph_file=f"{orbit_file_path}/shp_calval_nadir.zip")
+        print(f"Found {len(pass_IDs_list)-science_cycle_n} passes in {len(cycle_split[1])} cycles for the calval phase")
 
     # Loop through cycles
     for cycle in cycles:
@@ -170,9 +180,9 @@ def run_download(sw_corner, ne_corner, cycles, remote_path, save_path, orbit_fil
             for nc_file in nc_files:
                 if pass_id in nc_file.split(f"{product}_{cycle_str}_")[1].split("_")[1]:
                     download_url = f"{remote_fileserver_path}/cycle_{cycle_str}/{nc_file}"
-                    save_path = os.path.join(save_path, f"cycle_{cycle_str}")
+                    save_path_ncfile = os.path.join(save_path, f"cycle_{cycle_str}")
                     try:
-                        download_nc_file(download_url, save_path, ssh_kwargs)
+                        download_nc_file(download_url, save_path_ncfile, ssh_kwargs)
                     except Exception as e:
                         print(f"Failed to download {download_url}: {e}")    
 
