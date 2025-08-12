@@ -30,6 +30,7 @@ import traceback
 
 # For sbatch script
 import argparse
+import traceback
 
 import timeit
 
@@ -41,7 +42,8 @@ DATA_PROVIDER = 'POCLOUD'
 # Function to download and subset VIIRS satellite SST data using NASA Earthdata access
 def download_raw_SST_earthaccess(data_short_name, save_path, sw_lon, sw_lat, ne_lat, ne_lon,
                                   start_time='2023-04-01T21:00:00Z', end_time='2023-07-28T20:59:59Z',
-                                  only_get_pixel_mask=False, quality_level=1, save=False):
+                                  only_get_pixel_mask=False, quality_level=1, save=False, fields=None,
+                                  clean=False,save_type=".nc"):
     """
     Downloads and subsets Sea Surface Temperature (SST) satellite data from NASA's 
     Common Metadata Repository (CMR) using the Earthaccess client.
@@ -75,12 +77,17 @@ def download_raw_SST_earthaccess(data_short_name, save_path, sw_lon, sw_lat, ne_
     quality_level : int, optional
         The minimum acceptable quality level for filtering SST pixels. Currently unused 
         in this function but intended for future mask filtering logic. Default is 1.
-
+    fields: list of variables or Nonetype
+        If list of variables only 
     Returns
     -------
     list
         List of search result objects (metadata for matched data granules).
     """
+    if "LEO" in data_short_name:
+        save_type = ".zarr"
+    elif "MUR" in data_short_name:
+        save_type = ".nc"
     print("data_short_name",data_short_name)
     results = earthaccess.search_data(
         short_name=data_short_name,
@@ -92,28 +99,68 @@ def download_raw_SST_earthaccess(data_short_name, save_path, sw_lon, sw_lat, ne_
     if save:
         for result in results:
             file = earthaccess.open([result])[0]
-            print(f"Found {file}, attempting download..")
-            ds = xr.open_dataset(file)[["analysed_sst","analysis_error","mask"]]
+            print(f"Accessing file {file}")
+            if os.path.exists(f"{save_path}/{file.full_name.split("/")[-1]}{save_type}"):
+                if clean:
+                    try: 
+                        ds = xr.open_dataset(f"{save_path}/{file.full_name.split("/")[-1]}{save_type}")
+                    except Exception as e:
+                        os.remove(f"{save_path}/{file.full_name.split("/")[-1]}{save_type}")
+                        print(f"Attempting to open file rased Exception {e}, \
+                                \n File {save_path}/{file.full_name.split("/")[-1]}{save_type} is possibly corrupted or incomplete. \
+                                \b Deleting and retrying download...")
+                        pass
+                else:
+                    print(f"Some form of {save_path}/{file.full_name.split("/")[-1]}{save_type} already exists! Skipping for now...")
+                    continue
+            print(f"Found {file}, saving to {save_path}/{file.full_name.split("/")[-1]}{save_type}")
+            if not fields:
+                ds = xr.open_dataset(file)
+            else:
+                print(f"Pulling fields {fields}")
+                ds = xr.open_dataset(file)[fields]
             if not os.path.exists(f"{save_path}/"):
                 os.makedirs(f"{save_path}/",exist_ok=True)
-            if os.path.exists(f"{save_path}/{file.full_name.split("/")[-1]}"):
-                print(f"Some form of {save_path}/{file.full_name.split("/")[-1]} already exists! Skipping for now...")
             else:
                 # Add some stuff to ensure correct time encoding
+                print(f"Attempting to download {ds} with variables {ds.variables}")
                 for var in ds.variables:
-                    if "time" in var or "timedelta" in var:
+                    if "time" in var or "dt" in var:
                         ds[var].encoding["dtype"] = "int64"
                 if "MUR" in data_short_name:
-                    ds.chunk({"lat":1000,"lon":1000}).to_netcdf(f"{save_path}/{file.full_name.split("/")[-1]}")
-                else:
-                    ds.to_netcdf(f"{save_path}/{file.full_name.split("/")[-1]}")
+                    try:
+                        ds.chunk({"lat":1000, "lon":1000}).to_netcdf(f"{save_path}/{file.full_name.split("/")[-1]}{save_type}")
+                    except OverflowError:
+                        encoding = {v: {"dtype": "int64"} for v in ds.data_vars if 'time' in v.lower()}
+                        ds.chunk({"lat":1000, "lon":1000}).to_netcdf(f"{save_path}/{file.full_name.split("/")[-1]}{save_type}", encoding=encoding)
+                    except Exception as e:
+                        ds = ds.drop_vars(["dt_1km_data","time"])
+                        ds.chunk({"lat":1000, "lon":1000}).to_netcdf(f"{save_path}/{file.full_name.split("/")[-1]}{save_type}", encoding=encoding)
+                    except Exception as e:
+                        print(f"Download failed with exception {e}")
+                        traceback.print_exc() # Prints the full traceback to stderr
+                        print(ds)
+                elif "LEO" in data_short_name:
+                    try:
+                        ds.chunk({"lat":1000, "lon":1000}).to_zarr(f"{save_path}/{file.full_name.split("/")[-1]}{save_type}")
+                    except OverflowError:
+                        encoding = {v: {"dtype": "int64"} for v in ds.data_vars if 'time' in v.lower()}
+                        ds.chunk({"lat":1000, "lon":1000}).to_zarr(f"{save_path}/{file.full_name.split("/")[-1]}{save_type}", encoding=encoding)
+                    except Exception as e:
+                        ds = ds.drop_vars(["dt_1km_data","time"])
+                        ds.chunk({"lat":1000, "lon":1000}).to_zarr(f"{save_path}/{file.full_name.split("/")[-1]}{save_type}", encoding=encoding)
+                    except Exception as e:
+                        print(f"Download failed with exception {e}")
+                        traceback.print_exc() # Prints the full traceback to stderr
+                        print(ds)
+    print("Done")
     return results
 
 
 
 def subset_raw_SST_earthaccess(file_path, lat, lon, save_name="test", save_path="./tests/", n=128,
                                 L_x=512e3, L_y=512e3, subset_deg=3,
-                                timedelta_for_mean=np.timedelta64(1, 'D'),
+                                timedelta_for_mean=None,#Should be in np.timedelta format: np.timedelta64(1, 'D')
                                 only_get_pixel_mask=False, quality_level=2, skip_NaN=False, time_chunk=50):
     """
     Extract and process a spatial subset of SST (Sea Surface Temperature) satellite data
@@ -160,12 +207,19 @@ def subset_raw_SST_earthaccess(file_path, lat, lon, save_name="test", save_path=
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Check if the processed file already exists to avoid redundant computation
     if os.path.isfile(f"{save_path}{save_name}"):
-        print(f"Some form of {save_path}{save_name}.zarr already exists! Skipping for now...")
+        print(f"Some form of {save_path}{save_name}.zarr already exists!")
+        if ".zarr" in save_name:
+            try:
+                xr.open_zarr(f"{save_path}{save_name}")
+            except Exception as e:
+                print(f"Failed to open {save_path}{save_name} \n with \
+                        exception {e}")
+                print(f"Check file integrity")
         return
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Get all NetCDF files in the specified directory
     files = sorted(glob.glob(f"{file_path}/*.nc"))
-
+    # Sort by date (this usually can be found by sorting swath filenames)
     print("files[0]", files[0])
     print("files[1]", files[1])
 
@@ -202,50 +256,38 @@ def subset_raw_SST_earthaccess(file_path, lat, lon, save_name="test", save_path=
     file_matches = [file for prefix in prefixes for file in files if prefix in file]
 
     arrs_out = []  # Store processed/interpolated datasets
-
     # Log file for skipped files
     with open(f"sbatch_logs/skipped_sst_files_for_{save_name}", "w") as f:
         f.write("skipped files \n------------- \n")
-
     # Process each matched file
     for file in file_matches:
         try:
             ds = xr.open_dataset(file)
-
             # Standardize lat/lon dimension names if necessary
             if "lat" in ds:
                 ds = ds.rename({"lat": "latitude", "lon": "longitude"})
-
             # Skip file if the target region is clearly out of bounds
             if (lat < ds.latitude.min() - 3) or (lat > ds.latitude.max() + 3) or \
                (lon < ds.longitude.min() - 3) or (lon > ds.longitude.max() + 3):
                 print("Likely no valid data in bounds, skipping file.")
                 continue
-
             # Extract data subset around target lat-lon
             ds_subset = swot_utils.xr_subset(ds, [lat - subset_deg, lat + subset_deg],
                                                 [lon - subset_deg, lon + subset_deg])
-
             if not isinstance(ds_subset, xr.Dataset):
                 print("No valid data in bounds, skipping file.")
                 continue
-            
             # Do expensive filtering step here...
-            #ds_out_sst_filtered_q2 = ds_subset.sea_surface_temperature.where(ds_subset.quality_level>=2,other=np.nan).rename("sst_filtered_q2")
-            #ds_out_sst_filtered_q3 = ds_subset.sea_surface_temperature.where(ds_subset.quality_level>=3,other=np.nan).rename("sst_filtered_q3")
-            #ds_out_sst_filtered_q4 = ds_subset.sea_surface_temperature.where(ds_subset.quality_level>=4,other=np.nan).rename("sst_filtered_q4")
-            ds_out_sst_filtered_q5 = ds_subset.sea_surface_temperature.where(ds_subset.quality_level>=5,other=np.nan).rename("sst_filtered_q5")
-            
-            ds_subset = xr.merge([ds_subset,ds_out_sst_filtered_q5])
+            # This is only applicable to High Res SST satellite data
+            if "sea_surface_temperature" in list(ds_subset.keys()) and "quality_level" in list(ds_subset.keys()):
+                ds_out_sst_filtered_q5 = ds_subset.sea_surface_temperature.where(ds_subset.quality_level>=5,other=np.nan).rename("sst_filtered_q5")
+                ds_subset = xr.merge([ds_subset,ds_out_sst_filtered_q5])
             # Interpolate to uniform ENU grid
             interp_ds = interp_utils.grid_everything(ds_subset, lat, lon, n=n, L_x=L_x, L_y=L_y)
-
             # Add time coordinate from the original subset
-            interp_ds = interp_ds.expand_dims(dim={"time": 1}, axis=0).assign_coords(
-                time=("time", [ds_subset.time.values]))
-
+            interp_ds = interp_ds.expand_dims(dim={"time": 1}, axis=0).assign_coords(time=("time", [ds_subset.time.values]))
             # NaN filtering logic (optional)
-            if skip_NaN:
+            if skip_NaN and "quality_level" in list(interp_ds.keys()):
                 if interp_ds.quality_level.isnull().sum() > 10:
                     print(f"Significant NaN values found in {file}, skipping for now")
                 else:
@@ -254,7 +296,6 @@ def subset_raw_SST_earthaccess(file_path, lat, lon, save_name="test", save_path=
             else:
                 print(f"Successfully processed {file}, appending to dataset")
                 arrs_out.append(interp_ds)
-
         except Exception as e:
             # Handle and log errors for debugging
             print(f"There was a problem handling {file}, skipping for now")
@@ -262,19 +303,13 @@ def subset_raw_SST_earthaccess(file_path, lat, lon, save_name="test", save_path=
                 f.write(f"{file}\n")
             traceback.print_exc()
             pass
-
     # Final dataset merge
     if len(arrs_out) < 1:
         ds_out = None
     else:
         ds_out = xr.concat(arrs_out, dim="time")
-
     # Optional daily aggregation (mean or max)
-    if isinstance(timedelta_for_mean, type(None)):
-        # Compute daily mean SST values
-        pass
-        
-    elif isinstance(timedelta_for_mean, np.timedelta64):
+    if isinstance(timedelta_for_mean, np.timedelta64):
         try:
             if only_get_pixel_mask:
                 ds_out = ds_out.resample(time=timedelta_for_mean).max()
@@ -286,7 +321,6 @@ def subset_raw_SST_earthaccess(file_path, lat, lon, save_name="test", save_path=
             traceback.print_exc()
     else:
         print("timedelta_for_mean should be either None or np.timedelta64")
-
     # Notify user where the final dataset is stored
     if not isinstance(ds_out, type(None)):
         ds_out.chunk({'time': time_chunk}).to_zarr(f"{save_path}/{save_name}")

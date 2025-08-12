@@ -89,10 +89,11 @@ def find_swaths(sw_corner, ne_corner, path_to_sph_file="./orbit_data/sph_science
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # Function: download_passes
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-def download_passes(pass_ID, cycle="001", remote_path="swot_products/l3_karin_nadir/l3_lr_ssh/v1_0_2/Unsmoothed",
-                    save_path=f"../../SWOT_L3/Unsmoothed/cycle_001", hostname="ftp-access.aviso.altimetry.fr",
+def download_passes(pass_ID, cycle="001", remote_path="swot_products/l3_karin_nadir/l3_lr_ssh/v2_0_1/Unsmoothed",
+                    save_path=f"~/scratch/SWOT_L3_v2_0_1/Unsmoothed/cycle_001", hostname="ftp-access.aviso.altimetry.fr",
                     port=2221, username="tdmonkman@uchicago.edu", password="2prSvl",
-                    subset=False, lat_lims=False, lon_lims=False, trim_suffix="trimmed"):
+                    variables=None,
+                    subset=False, lat_lims=False, lon_lims=False, trim_suffix="",**kwargs):
     """
     Downloads SWOT passes from the AVISO+ FTP server using SFTP.
 
@@ -139,7 +140,7 @@ def download_passes(pass_ID, cycle="001", remote_path="swot_products/l3_karin_na
         target_remote_file = f"SWOT_L{version}_LR_SSH_Expert_{cycle}_{pass_ID}"
 
     # Initialize SSH connection
-    print("Attempting SSH connection...")
+    print(f"Attempting SSH connection for target remote file {target_remote_file}...")
     with paramiko.SSHClient() as ssh_client:
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh_client.connect(hostname, port, username, password, timeout=30)
@@ -170,7 +171,7 @@ def download_passes(pass_ID, cycle="001", remote_path="swot_products/l3_karin_na
 
             # Skip if file already exists locally
             if os.path.isfile(local_file_path):
-                print(f"{local_file_path} already exists!")
+                print(f"{local_file_path} already exists! Skipping for now...")
                 continue
 
             try:
@@ -184,12 +185,14 @@ def download_passes(pass_ID, cycle="001", remote_path="swot_products/l3_karin_na
                     sftp_client.get(f"{remote_path_cycle}/{remote_file}", temp_file)
                     # Open and trim datasets
                     with xr.open_dataset(temp_file) as swath:
+                        if variables:
+                            swath = swath[variables]
                         if "cross_track_distance" in swath.keys():
                             swath = swath.drop_vars("cross_track_distance")
                         if isinstance(lon_lims, list):
                             trimmed_swath = swot_utils.xr_subset(swath, lat_lims, lon_lims).load()          
                         else:
-                            trimmed_swath = swot_utils.subset(swath, lat_lims).load()
+                            trimmed_swath = swot_utils.subset(swath, lat_bounds=lat_lims).load()
                             # The 'xr_subset' function returns a 'None' type if it can't find
                             # data in the lat bounds. NOE: I'm using a 'try' block here so 
                             # if a Nonetype is returned there may be other issues besides 
@@ -199,7 +202,7 @@ def download_passes(pass_ID, cycle="001", remote_path="swot_products/l3_karin_na
                             print(f"No valid data found in lats {lat_lims}")     
                             pass
                         else:
-                            trimmed_filename = f"{remote_file[:-3]}_{trim_suffix}.nc"
+                            trimmed_filename = f"{remote_file[:-3]}{trim_suffix}.nc"
                             trimmed_swath.to_netcdf(f"{save_path}/{trimmed_filename}")
 
                     if os.path.isfile(temp_file):
@@ -247,108 +250,3 @@ def clean_incomplete_files(path, size=0.05):
 
 
 
-'''
-# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-# DEMO
-# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-import os
-import time
-
-# Add the path to the Tatsu's swot download library
-import sys
-sys.path.append('./tatsu_src/')
-import tatsu_download_swaths as tatsu_download
-
-#turn off warnings
-import warnings
-warnings.filterwarnings("ignore")
-
-# Define connection parameters
-ssh_kwargs = {
-              "hostname":"ftp-access.aviso.altimetry.fr",
-              "port": 2221,
-              "username":"tdmonkman@uchicago.edu",
-              "password":"2prSvl"
-            }
-
-# Define bounding domain
-# small Agulhas
-# sw_corner = [10.0,  -42.0] # [degE, degN]
-# ne_corner = [18.0, -36.0] # [degE, degN]
-# big Agulhas-50,-30
-sw_corner = [5.0, -50.0]
-ne_corner = [30.0, -30.0]
-# West Greenland 
-# sw_corner = [-53.55, 71.32]
-# ne_corner = [-51.33, 72.0]
-# Global dataset
-# sw_corner = [-180, -90]
-# ne_corner = [180, 90]
-
-lat_lims = [sw_corner[1],ne_corner[1]]
-
-# Specify cycles you want to downnload
-# Cycles 001 - 016 are for the science orbit
-# cycles = [str(c_num).zfill(3) for c_num in range(1,17)]
-# Cycles 474 - 578 are from the 1-day repeat 
-cycles = [str(c_num).zfill(3) for c_num in range(525,579)]
-
-# Use sph_science_swath for the 21-day repeat
-# path_to_sph_file="../orbit_data/sph_science_swath.zip"
-# Use sph_calval_swath for the 1-day repeats
-path_to_sph_file="../orbit_data/sph_calval_swath.zip"
-
-# Get pass IDs for swaths that intersect your box
-pass_IDs_list = tatsu_download.find_swaths(sw_corner, ne_corner,
-                                           path_to_sph_file=path_to_sph_file)
-
-
-# pass_IDs_list is just a list of 3-digit strings with the pass number and 
-# leading zeros, i.e. ["001","555",etc...]. You can write your own if 
-# you know which swaths you want.
-# For example pass_IDs_list = ["001","013","016","026"] gives you SoCal and Agulhas
-pass_IDs_list = ["001","013","016","026"]
-
-# Paths for L3 unsmoothed data
-remote_path="swot_products/l3_karin_nadir/l3_lr_ssh/v1_0_2/Unsmoothed"
-local_path = "../../SWOT_L3/Unsmoothed"
-
-# Paths for L2 expert data
-# remote_path="/swot_products/l2_karin/l2_lr_ssh/PIC0/Expert"
-# local_path = "../../SWOT_L3/Unsmoothed"
-
-
-# Make a file to store IDs for swaths that didn't download
-with open("skipped_swaths.txt","w") as file:
-    file.write("Failed to download the following swaths:")
-    file.write(" cycle, pass_ID \n ----------")
-    file.close()
-
-# MAKE SURE TO CHANGE THE SAVE PATH
-for cycle in cycles:
-    save_path = local_path+f"/cycle_{cycle}"
-    if not os.path.isdir(save_path):
-        os.makedirs(save_path, exist_ok=False)
-    # If you want to clean any existing files in the path,
-    # do so here.
-    tatsu_download.clean_incomplete_files(save_path, size=10)
-    
-    # Download passes
-    for pass_ID in pass_IDs_list:
-        try:
-            tatsu_download.download_passes(pass_ID,cycle=cycle,remote_path=remote_path,
-                                           save_path=save_path,**ssh_kwargs,
-                                           subset=False,lat_lims=lat_lims,trim_suffix="")
-        except Exception as e:
-            print("*****"*5)
-            print(f"Could not download pass {pass_ID} in cycle {cycle}")
-            print(f"An error occured: {e}")
-            print("*****"*5)
-            with open("skipped_swaths.txt","a") as file:
-                file.write(f"\n {cycle}, {pass_ID}")
-                
-    # Sleep for 10 seconds so you don't make AVISO mad 
-    time.sleep(10)
-
-    
-'''

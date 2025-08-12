@@ -55,24 +55,21 @@ def subset(data_in, lat_bounds, lon_bounds=None):
     # Calculate cross-swath averaged latitudes and handle NaN values
     lat = np.nanmean(data_in['latitude'].load().values, axis=-1)
     lat = np.where(np.isnan(lat), 100, lat)  # Replace NaN values with 100 to avoid errors
-
     # Extract latitude bounds
     l0, l1 = lat_bounds
-
     # Find indices corresponding to the closest mean latitude values within bounds
     j0 = np.where(np.abs(lat - l0) == np.abs(lat - l0).min())[0][0]
     j1 = np.where(np.abs(lat - l1) == np.abs(lat - l1).min())[0][0]
-
     # Ensure the indices are in increasing order (flip if necessary)
     if j0 > j1:
         j0, j1 = j1, j0
-
     # If bounding indices are the same, return None (no valid subset)
     if j0 == j1:
         print(f"No data found in lat bounds")
         return None
-
     # Perform similar processing for longitude bounds, if provided
+    if lon_bounds[0] == None and lon_bounds[1] == None:
+        lon_bounds = None
     if lon_bounds is not None:
         lon = np.nanmean(data_in['longitude'].load().values, axis=0)
         lon = np.where(np.isnan(lon), 100, lon)  # Replace NaN values
@@ -88,7 +85,6 @@ def subset(data_in, lat_bounds, lon_bounds=None):
         # If no longitude bounds provided, set indices to None
         i0 = None
         i1 = None
-
     # Subset variables that share the latitude (and optionally longitude) dimensions
     subset_vars = {}
     for varname, var in data_in.data_vars.items():
@@ -109,15 +105,13 @@ def subset(data_in, lat_bounds, lon_bounds=None):
         else:
             # For other variables, subset only by latitude
             subset_vars[varname] = var[j0:j1]
-            
     # Combine the subset variables into a new xarray Dataset
     subset_data = xr.Dataset(subset_vars, attrs=data_in.attrs)
-    
     return subset_data
 
 
 
-def xr_subset(data_in, lat_bounds, lon_bounds=None):
+def xr_subset(data_in, lat_bounds, lon_bounds=None, fast_llc=False):
     """
     Subsets an xarray dataset based on latitude and longitude bounds.
     This script is for use on any arbitrary xarray "swath", i.e. 
@@ -132,13 +126,24 @@ def xr_subset(data_in, lat_bounds, lon_bounds=None):
         Two-element list or tuple specifying the north-south latitude range for subsetting.
     lon_bounds : iterable
         Two-element list or tuple specifying the east-west longitude range for subsetting.
+    fast_llc : boolean
+        If True, do a fast subset built for llc4320 data by indexing using the mean lat - lons 
+        in the i and j directions 
     
     Returns
     -------
     subset_data : xarray.Dataset or None
         Subset of the input dataset, or None if no valid subset can be created.
     """
-    # Create a boolean mask for latitude, selecting values within the given latitude bounds.
+
+    if fast_llc:
+        mean_latitude = data_in.latitude.mean(dim="i")
+        mean_longitude = data_in.longitude.mean(dim="j")
+        j_bounds = np.where((mean_latitude.values>min(lat_bounds)) & (mean_latitude.values < max(lat_bounds)))[0][[0,-1]]
+        i_bounds = np.where((mean_longitude.values>min(lon_bounds)) & (mean_longitude.values < max(lon_bounds)))[0][[0,-1]]
+        return data_in.isel(i=slice(int(i_bounds[0]),int(i_bounds[1])),j=slice(int(j_bounds[0]),int(j_bounds[1])))
+
+    # Create a boolean mask for latitude, selecting values within the given latitude bounds (plus some buffer).
     mask_lat = (data_in.latitude >= min(lat_bounds)-1) & (data_in.latitude <= max(lat_bounds)+1)
 
     if lon_bounds != None:
@@ -207,20 +212,16 @@ def compute_power_spectra_xrft(cycle_data, subset=False, lim0=1, lim1=519, asser
     for swath_ds in cycle_data:
         # Extract the field data and convert to centimeters
         swath = swath_ds[field].values[:, :] * 100
-
         # Subset the swath data in the cross-swath direction if required
         if subset:
             swath[:, :lim0] = np.nan  # Mask the first `lim0` columns
             swath[:, lim1:520 - lim1] = np.nan  # Mask the middle columns
             swath[:, 520 - lim0:] = np.nan  # Mask the last `lim0` columns
-
         # Mask out NaN columns and retain valid columns
         msk = np.isnan(swath.mean(axis=0))
         swath = swath[:, ~msk]
-
         # Transpose swath for FFT (now rows represent cross-swath data)
         swath = swath.T
-
         # Initialize arrays to store frequency and power spectral density for this swath
         freqs = np.zeros(swath.shape)
         psds = np.zeros(swath.shape)
@@ -231,13 +232,10 @@ def compute_power_spectra_xrft(cycle_data, subset=False, lim0=1, lim1=519, asser
             Nx = swath_i.size  # Number of points
             dx = 0.25  # Spacing between points
             da = xr.DataArray(swath_i, dims="x", coords={"x": dx * np.arange(0, swath_i.size)})
-
             # Compute the Discrete Fourier Transform
             FT = xrft.dft(da, dim="x", true_phase=True, true_amplitude=True)
-
             # Compute the power spectrum
             ps = xrft.power_spectrum(da, dim="x")
-
             # Store frequencies and power spectral densities
             freqs[i, :] = FT["freq_x"].values
             psds[i, :] = ps.values

@@ -32,6 +32,7 @@ import argparse
 import requests
 import xml.etree.ElementTree as ET # For parsing the THREDDS 
 import tqdm
+import xarray as xr
 import geopandas as gpd  # For working with geospatial data
 import shapely.geometry as geometry  # For defining bounding boxes and geometry
 from itertools import groupby
@@ -40,6 +41,7 @@ warnings.simplefilter("default")
 import sys
 sys.path.append('../../SWOT-data-analysis/src')
 import download_swaths
+import swot_utils
 
 # ─────────────────────────────────────────────
 # XML Catalog Parsing
@@ -59,16 +61,29 @@ def list_nc_files_from_thredds_catalog(catalog_url, ssh_kwargs):
 # ─────────────────────────────────────────────
 # File Downloader with Progress Bar
 # ─────────────────────────────────────────────
-def download_nc_file(download_url, save_path, ssh_kwargs):
+def download_nc_file(download_url, save_path, ssh_kwargs, variables=[], clean=False, subset=False, lon_lims=None, lat_lims=None, pull_vars=False, **kwargs):
     """Download a .nc file from THREDDS fileServer with a progress bar, if not already downloaded."""
-    print("save_path",save_path)
     os.makedirs(save_path, exist_ok=True)
     local_filename = os.path.join(save_path, os.path.basename(download_url))
-
+    skip_download = False
     if os.path.exists(local_filename):
-        print(f"✔ File already exists, skipping: {local_filename}")
+        print(f"✔ File already exists under: {local_filename}")
+        skip_download = True
+        try:
+            xr.open_dataset(local_filename)
+        except Exception as e:
+            if not clean:
+                print(f"WARNING {local_filename} is possibley corrupted. Set clean=True to automatically redownload")
+                skip_download = True
+            else:
+                print(f"{local_filename} is possibley corrupted. Deleting local data...")
+                os.remove(local_filename)
+                skip_download = False
+    if skip_download:
+        print("Skipping download...")
         return local_filename
-
+    print("Attempting download...")
+    
     with requests.get(download_url, stream=True, auth=(ssh_kwargs["username"], ssh_kwargs["password"])) as r:
         r.raise_for_status()
         total_size = int(r.headers.get('content-length', 0))
@@ -82,6 +97,24 @@ def download_nc_file(download_url, save_path, ssh_kwargs):
                     f.write(chunk)
                     pbar.update(len(chunk))
 
+    if len(variables) > 0 or pull_vars or subset:
+        raw_swath = xr.open_dataset(local_filename)
+        if pull_vars or subset:
+            print(f"Pulling {variables} from swath...")
+            swot_variables = []
+            for var in variables:
+                if not var in list(raw_swath.keys()):
+                    print(f"Could not find variable {var} in swot variales {list(raw_swath.keys())}")
+                else:
+                    swot_variables.append(var)
+            if len(swot_variables) == 0:
+                print(f"No variables {variables} found in swot dataset, pulling all variables")
+            raw_swath = raw_swath[swot_variables]
+        if subset:
+            print(f"Subsetting swath in lon_bounds={lon_lims}, lat_bounds={lat_lims}, where Nonetype = no subsetting")
+            raw_swath = swot_utils.subset(raw_swath,lon_bounds=lon_lims, lat_bounds=lat_lims)
+        os.remove(local_filename)
+        raw_swath.to_netcdf(local_filename)
     return local_filename
 
 
@@ -100,24 +133,19 @@ def find_swaths(sw_corner, ne_corner, path_to_sph_file="./orbit_data/sph_science
     except:
         print("Error: Ensure the shapefile exists in the correct directory.")
         return []
-
     # Define the bounding box as a Shapely geometry
     bbox = geometry.box(sw_corner[0], sw_corner[1], ne_corner[0], ne_corner[1])
-
     # Extend the bounding box by 0.2° for better coverage
     extended_bbox = geometry.box(
         bbox.bounds[0] - 0.2, bbox.bounds[1] - 0.2,
         bbox.bounds[2] + 0.2, bbox.bounds[3] + 0.2
     )
-
     # Filter the GeoDataFrame for passes that intersect the bounding box
     overlapping_segments = gdf_karin[gdf_karin.intersects(extended_bbox)]
-
     # Extract pass IDs and format them as 3-digit strings with leading zeros
     pass_IDs_list = []
     for foo in overlapping_segments["ID_PASS"].values:
         pass_IDs_list.append(str(foo).zfill(3))
-
     return pass_IDs_list
 
 
@@ -125,11 +153,26 @@ def find_swaths(sw_corner, ne_corner, path_to_sph_file="./orbit_data/sph_science
 # ─────────────────────────────────────────────
 # Main Logic to Download SWOT .nc Files
 # ─────────────────────────────────────────────
-def run_download(pass_IDs_list, cycles, remote_path, save_path, ssh_kwargs="ssha", find_swaths=False,sw_corner=[-180,-90], ne_corner=[180,90], orbit_file_path="../../orbit_files"):
+def run_download(pass_IDs_list, 
+                 cycles, 
+                 remote_path, 
+                 save_path, 
+                 ssh_kwargs,
+                 variables=[], 
+                 find_swaths=False, 
+                 sw_corner=[-180,-90],
+                 ne_corner=[180,90], 
+                 orbit_file_path="../../orbit_files",
+                 clean=False, 
+                 subset=False,
+                 **kwargs):
     """
     Download SWOT .nc files from THREDDS that intersect with a region
     and match given cycles.
     """
+    lon_lims, lat_lims = None, None
+    if subset:
+        lon_lims, lat_lims = [sw_corner[0],ne_corner[0]], [sw_corner[1],ne_corner[1]]
     # Specify the remote and catalog paths.
     # Add some logic in case people speciify the entire remote path..
     if "https://tds-odatis.aviso.altimetry.fr/" in remote_path:
@@ -166,6 +209,8 @@ def run_download(pass_IDs_list, cycles, remote_path, save_path, ssh_kwargs="ssha
                 pass_IDs_list += find_swaths(sw_corner, ne_corner, path_to_sph_file=f"{orbit_file_path}/shp_calval_nadir.zip")
         print(f"Found {len(pass_IDs_list)-science_cycle_n} passes in {len(cycle_split[1])} cycles for the calval phase")
 
+    print(f"Looking for swaths with PIDS {pass_IDs_list} in cycles {cycles}")
+
     # Loop through cycles
     for cycle in cycles:
         cycle_str = str(cycle).zfill(3)
@@ -178,11 +223,22 @@ def run_download(pass_IDs_list, cycles, remote_path, save_path, ssh_kwargs="ssha
             continue
         for pass_id in pass_IDs_list:
             for nc_file in nc_files:
-                if pass_id in nc_file.split(f"{product}_{cycle_str}_")[1].split("_")[1]:
+                if pass_id in nc_file.split(f"{product}_{cycle_str}_")[1].split("_")[0]:
+                    print(f"Found PID {pass_id} in {nc_file}")
+                    #print("ncfile split [0]: ", nc_file.split(f"{product}_{cycle_str}_")[1].split("_")[0])
+                    #print("ncfile split [1]: ", nc_file.split(f"{product}_{cycle_str}_")[1].split("_")[1])
                     download_url = f"{remote_fileserver_path}/cycle_{cycle_str}/{nc_file}"
+                    print("save_path outer",save_path)
                     save_path_ncfile = os.path.join(save_path, f"cycle_{cycle_str}")
                     try:
-                        download_nc_file(download_url, save_path_ncfile, ssh_kwargs)
+                        download_nc_file(download_url, 
+                                         save_path_ncfile, 
+                                         ssh_kwargs,
+                                         variables=variables, 
+                                         clean=clean, 
+                                         subset=subset, 
+                                         lon_lims=lon_lims, 
+                                         lat_lims=lat_lims)
                     except Exception as e:
                         print(f"Failed to download {download_url}: {e}")    
 
