@@ -173,3 +173,7 @@ cython_debug/
 examples/*.txt
 examples/*.nc
 examples/~
+
+# pixi environments
+.pixi
+*.egg-info
