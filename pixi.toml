@@ -1,7 +1,7 @@
 [workspace]
 authors = ["ryansjdu <ryan.du@mines.edu>"]
 channels = ["conda-forge"]
-name = "swot_python12"
+name = "swot_download"
 platforms = ["linux-64"]
 version = "0.1.0"
 
